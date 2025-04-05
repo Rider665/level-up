@@ -1,0 +1,13 @@
+{
+  "sgs_score": 1.7,
+  "qlm_score": 2.07,
+  "sss_score": 3.77,
+  "cgpa": 2.22,
+  "grade": "B",
+  "is_accredited": true,
+  "normalized_qnm": {
+    "3.2.1": 0.94,
+    "4.1.1": 4.0,
+    "5.2.1": 0.16
+  }
+}
