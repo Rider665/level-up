@@ -1,14 +1,23 @@
-import re
-import json
+from fastapi import FastAPI, UploadFile, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import List
+import pdfplumber
 import spacy
-from collections import defaultdict
-from sklearn.feature_extraction.text import TfidfVectorizer
 from transformers import pipeline
+from collections import defaultdict
+import re
+
+# Initialize FastAPI app
+app = FastAPI(title="NAAC SSR Summarizer API", version="1.0")
+
+# Initialize NLP and summarization models
+nlp = spacy.load("en_core_web_lg")
+summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+
 
 class SSRSummarizer:
     def __init__(self):
-        self.nlp = spacy.load("en_core_web_lg")
-        self.summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
         self.key_metrics = {
             'institution': None,
             'establishment_year': None,
@@ -34,7 +43,7 @@ class SSRSummarizer:
 
     def _extract_entities(self, text: str):
         """Extract key entities using rule-based + ML approach"""
-        doc = self.nlp(text)
+        doc = nlp(text)
         
         # Institution Name (First occurrence of ORG + College/University)
         for ent in doc.ents:
@@ -82,26 +91,15 @@ class SSRSummarizer:
 
     def _generate_summary(self, text: str) -> str:
         """Generate abstractive summary with key sections"""
-        # Identify important sections using TF-IDF
-        vectorizer = TfidfVectorizer(stop_words='english', ngram_range=(1,2))
-        tfidf = vectorizer.fit_transform([text])
-        feature_names = vectorizer.get_feature_names_out()
-        # Convert important terms to a list of str
-        important_terms = [str(term) for term in feature_names[tfidf.sum(axis=0).argsort()[0,-20:]]]
-        
-        # Filter text for key sections
-        sentences = [sent.text for sent in self.nlp(text).sents]
-        key_sentences = [s for s in sentences if any(term in s.lower() for term in important_terms)]
-        
         # Generate summary
-        return self.summarizer(
-            " ".join(key_sentences),
+        return summarizer(
+            text[:1024],  # Truncate to avoid model input limits
             max_length=500,
             min_length=200,
             do_sample=False
         )[0]['summary_text']
 
-    def _identify_key_sections(self, text: str) -> list:
+    def _identify_key_sections(self, text: str) -> List[dict]:
         """Identify critical NAAC sections"""
         naac_keywords = {
             'strengths': ['strength', 'advantage', 'achievement'],
@@ -122,34 +120,44 @@ class SSRSummarizer:
                 
         return findings[:5]  # Return top 5 critical findings
 
-from pathlib import Path
-import pdfplumber
 
-if __name__ == "__main__":
-    # Update the file path to point to the correct location of your SSR document.
-    pdf_file = Path(__file__).resolve().parent / "ssr_document.pdf"
-    
-    # Extract text from the PDF
+@app.get("/")
+async def root():
+    return {"message": "Welcome to the NAAC SSR Summarizer API. Use /docs for API documentation."}
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    return JSONResponse(content={})
+
+
+@app.post("/process-text/")
+async def process_text(input_text: str):
+    """Process plain text input"""
     try:
-        with pdfplumber.open(pdf_file) as pdf:
-            ssr_text = ""
-            for page in pdf.pages:
-                ssr_text += page.extract_text()
-        
         summarizer = SSRSummarizer()
-        report = summarizer.process_ssr(ssr_text)
-        
-        print("# NAAC SSR Executive Summary\n")
-        print("## Key Metrics")
-        print(json.dumps(report["key_metrics"], indent=2))
-        
-        print("\n## Executive Summary")
-        print(report["executive_summary"])
-        
-        print("\n## Critical Findings")
-        for finding in report["critical_findings"]:
-            print(f"### {finding['type'].title()}")
-            print(f"{finding['excerpt']}\n")
-    
+        result = summarizer.process_ssr(input_text)
+        return JSONResponse(content=result)
     except Exception as e:
-        print(f"Error processing the PDF: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/process-pdf/")
+async def process_pdf(file: UploadFile):
+    """Process PDF file input"""
+    try:
+        if not file.filename.endswith(".pdf"):
+            raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+        
+        # Extract text from PDF
+        with pdfplumber.open(file.file) as pdf:
+            text = ""
+            for page in pdf.pages:
+                text += page.extract_text()
+        
+        # Process the extracted text
+        summarizer = SSRSummarizer()
+        result = summarizer.process_ssr(text)
+        return JSONResponse(content=result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
